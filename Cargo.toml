@@ -1,0 +1,11 @@
+[package]
+name = "matcher-common"
+version = "0.1.0"
+edition = "2021"
+description = "Shared utilities for Percolator custom matching programs"
+
+[dependencies]
+solana-program = "2.1"
+
+[lib]
+crate-type = ["lib"]
