@@ -24,8 +24,12 @@ pub fn read_magic(ctx_data: &[u8]) -> u64 {
     u64::from_le_bytes(ctx_data[MAGIC_OFFSET..MAGIC_OFFSET + 8].try_into().unwrap())
 }
 
-/// Read the LP PDA pubkey from the context account
+/// Read the LP PDA pubkey from the context account.
+/// Returns `Pubkey::default()` if the buffer is too short.
 pub fn read_lp_pda(ctx_data: &[u8]) -> Pubkey {
+    if ctx_data.len() < LP_PDA_OFFSET + 32 {
+        return Pubkey::default();
+    }
     Pubkey::new_from_array(
         ctx_data[LP_PDA_OFFSET..LP_PDA_OFFSET + 32]
             .try_into()
@@ -41,7 +45,7 @@ pub fn verify_magic(ctx_data: &[u8], expected_magic: u64) -> bool {
     read_magic(ctx_data) == expected_magic
 }
 
-/// Verify LP PDA: checks that account[0] is a signer and matches the stored LP PDA
+/// Verify LP PDA: checks that account\[0\] is a signer and matches the stored LP PDA
 /// in the context account. This is the critical security check for all matchers.
 ///
 /// Returns Ok(()) on success, or an appropriate ProgramError on failure.
@@ -367,5 +371,12 @@ mod tests {
         // read_magic must handle data shorter than MAGIC_OFFSET + 8 gracefully
         let data = vec![0u8; 50]; // Less than MAGIC_OFFSET (64) + 8
         assert_eq!(read_magic(&data), 0);
+    }
+
+    #[test]
+    fn test_read_lp_pda_short_buffer() {
+        // read_lp_pda must handle data shorter than LP_PDA_OFFSET + 32 gracefully
+        let data = vec![0u8; 100]; // Less than LP_PDA_OFFSET (80) + 32
+        assert_eq!(read_lp_pda(&data), Pubkey::default());
     }
 }
