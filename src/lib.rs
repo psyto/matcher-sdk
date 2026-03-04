@@ -379,4 +379,374 @@ mod tests {
         let data = vec![0u8; 100]; // Less than LP_PDA_OFFSET (80) + 32
         assert_eq!(read_lp_pda(&data), Pubkey::default());
     }
+
+    // ===================================================================
+    // Constants & Layout Tests
+    // ===================================================================
+
+    #[test]
+    fn test_ctx_size_is_320() {
+        assert_eq!(CTX_SIZE, 320);
+    }
+
+    #[test]
+    fn test_return_data_layout() {
+        assert_eq!(RETURN_DATA_OFFSET, 0);
+        assert_eq!(RETURN_DATA_SIZE, 64);
+    }
+
+    #[test]
+    fn test_magic_offset_is_64() {
+        assert_eq!(MAGIC_OFFSET, 64);
+    }
+
+    #[test]
+    fn test_lp_pda_offset_is_80() {
+        assert_eq!(LP_PDA_OFFSET, 80);
+    }
+
+    #[test]
+    fn test_layout_regions_do_not_overlap() {
+        // Return data: [0..64), Magic: [64..72), Version: [72..76),
+        // Mode: [76..77), Padding: [77..80), LP PDA: [80..112)
+        let return_data_end = RETURN_DATA_OFFSET + RETURN_DATA_SIZE;
+        let magic_end = MAGIC_OFFSET + 8;
+        let lp_pda_end = LP_PDA_OFFSET + 32;
+
+        // Return data ends where magic begins
+        assert_eq!(return_data_end, MAGIC_OFFSET);
+        // Magic ends before LP PDA begins
+        assert!(magic_end <= LP_PDA_OFFSET);
+        // Everything fits within CTX_SIZE
+        assert!(lp_pda_end <= CTX_SIZE);
+    }
+
+    // ===================================================================
+    // read_magic Boundary Tests
+    // ===================================================================
+
+    #[test]
+    fn test_read_magic_exact_minimum_size() {
+        // Buffer exactly MAGIC_OFFSET + 8 should work
+        let mut data = vec![0u8; MAGIC_OFFSET + 8];
+        let magic = 0xDEAD_BEEF_CAFE_BABEu64;
+        data[MAGIC_OFFSET..MAGIC_OFFSET + 8].copy_from_slice(&magic.to_le_bytes());
+        assert_eq!(read_magic(&data), magic);
+    }
+
+    #[test]
+    fn test_read_magic_one_byte_short() {
+        // Buffer one byte too short for magic must return 0
+        let data = vec![0u8; MAGIC_OFFSET + 7];
+        assert_eq!(read_magic(&data), 0);
+    }
+
+    #[test]
+    fn test_read_magic_empty_buffer() {
+        let data: Vec<u8> = vec![];
+        assert_eq!(read_magic(&data), 0);
+    }
+
+    #[test]
+    fn test_read_magic_zero_stored() {
+        // Buffer with all zeros should read magic as 0
+        let data = vec![0u8; CTX_SIZE];
+        assert_eq!(read_magic(&data), 0);
+    }
+
+    // ===================================================================
+    // read_lp_pda Boundary Tests
+    // ===================================================================
+
+    #[test]
+    fn test_read_lp_pda_exact_minimum_size() {
+        // Buffer exactly LP_PDA_OFFSET + 32 should work
+        let mut data = vec![0u8; LP_PDA_OFFSET + 32];
+        let lp = Pubkey::new_unique();
+        data[LP_PDA_OFFSET..LP_PDA_OFFSET + 32].copy_from_slice(&lp.to_bytes());
+        assert_eq!(read_lp_pda(&data), lp);
+    }
+
+    #[test]
+    fn test_read_lp_pda_one_byte_short() {
+        // Buffer one byte too short must return default
+        let data = vec![0u8; LP_PDA_OFFSET + 31];
+        assert_eq!(read_lp_pda(&data), Pubkey::default());
+    }
+
+    #[test]
+    fn test_read_lp_pda_empty_buffer() {
+        let data: Vec<u8> = vec![];
+        assert_eq!(read_lp_pda(&data), Pubkey::default());
+    }
+
+    #[test]
+    fn test_read_lp_pda_from_initialized_header() {
+        let mut data = vec![0u8; CTX_SIZE];
+        let lp = Pubkey::new_unique();
+        write_header(&mut data, 0x1234, 0, &lp);
+        assert_eq!(read_lp_pda(&data), lp);
+    }
+
+    // ===================================================================
+    // verify_magic Edge Cases
+    // ===================================================================
+
+    #[test]
+    fn test_verify_magic_zero_against_zero() {
+        // A zeroed buffer has magic 0; verify_magic with expected 0 should still
+        // fail because the buffer check passes but zero magic is valid if stored.
+        // Actually verify_magic checks len < CTX_SIZE first, then compares magic.
+        // With full-size buffer and magic 0, verify_magic(data, 0) returns true.
+        let data = vec![0u8; CTX_SIZE];
+        assert!(verify_magic(&data, 0));
+    }
+
+    #[test]
+    fn test_verify_magic_exactly_319_bytes() {
+        // One byte under CTX_SIZE must fail
+        let data = vec![0u8; CTX_SIZE - 1];
+        assert!(!verify_magic(&data, 0));
+    }
+
+    #[test]
+    fn test_verify_magic_exactly_320_bytes() {
+        let data = vec![0u8; CTX_SIZE];
+        // Zero magic matches zero in buffer
+        assert!(verify_magic(&data, 0));
+    }
+
+    // ===================================================================
+    // write_header Detail Tests
+    // ===================================================================
+
+    #[test]
+    fn test_write_header_all_mode_values() {
+        // Mode is a single byte; test min, max, and a middle value
+        for mode in [0u8, 1, 127, 255] {
+            let mut data = vec![0u8; CTX_SIZE];
+            write_header(&mut data, 0xABCD, mode, &Pubkey::new_unique());
+            assert_eq!(data[76], mode, "Mode byte not stored correctly for {}", mode);
+        }
+    }
+
+    #[test]
+    fn test_write_header_padding_is_zeroed() {
+        let mut data = vec![0xFFu8; CTX_SIZE]; // pre-fill with 0xFF
+        write_header(&mut data, 0xABCD, 0, &Pubkey::new_unique());
+
+        // Padding region: bytes 77..80 must be zeroed
+        assert_eq!(data[77], 0);
+        assert_eq!(data[78], 0);
+        assert_eq!(data[79], 0);
+    }
+
+    #[test]
+    fn test_write_header_zeros_return_data_region() {
+        // Pre-fill return data with non-zero, then verify write_header zeros it
+        let mut data = vec![0xFFu8; CTX_SIZE];
+        write_header(&mut data, 0x1234, 0, &Pubkey::new_unique());
+
+        for i in RETURN_DATA_OFFSET..RETURN_DATA_OFFSET + RETURN_DATA_SIZE {
+            assert_eq!(data[i], 0, "Return data byte {} not zeroed", i);
+        }
+    }
+
+    #[test]
+    fn test_write_header_version_is_one() {
+        let mut data = vec![0u8; CTX_SIZE];
+        write_header(&mut data, 0x1234, 0, &Pubkey::new_unique());
+        let version = u32::from_le_bytes(data[72..76].try_into().unwrap());
+        assert_eq!(version, 1);
+    }
+
+    #[test]
+    fn test_write_header_overwrite_reinitializes_cleanly() {
+        let mut data = vec![0xFFu8; CTX_SIZE]; // Simulate dirty data
+
+        let lp1 = Pubkey::new_unique();
+        let magic1 = 0x1111_1111_1111_1111u64;
+        write_header(&mut data, magic1, 5, &lp1);
+
+        // Now overwrite with new values
+        let lp2 = Pubkey::new_unique();
+        let magic2 = 0x2222_2222_2222_2222u64;
+        write_header(&mut data, magic2, 3, &lp2);
+
+        // New values must be present
+        assert!(verify_magic(&data, magic2));
+        assert!(!verify_magic(&data, magic1));
+        assert_eq!(read_lp_pda(&data), lp2);
+        assert_ne!(read_lp_pda(&data), lp1);
+        assert_eq!(data[76], 3);
+        assert_eq!(u32::from_le_bytes(data[72..76].try_into().unwrap()), 1);
+    }
+
+    // ===================================================================
+    // write_exec_price Edge Cases
+    // ===================================================================
+
+    #[test]
+    fn test_write_exec_price_zero() {
+        let mut data = vec![0xFFu8; CTX_SIZE];
+        write_exec_price(&mut data, 0);
+        assert_eq!(u64::from_le_bytes(data[0..8].try_into().unwrap()), 0);
+    }
+
+    #[test]
+    fn test_write_exec_price_max_u64() {
+        let mut data = vec![0u8; CTX_SIZE];
+        write_exec_price(&mut data, u64::MAX);
+        assert_eq!(u64::from_le_bytes(data[0..8].try_into().unwrap()), u64::MAX);
+    }
+
+    #[test]
+    fn test_write_exec_price_does_not_corrupt_adjacent_bytes() {
+        let mut data = vec![0xAAu8; CTX_SIZE];
+        write_exec_price(&mut data, 42);
+        // Bytes 8..64 must remain 0xAA (only bytes 0..8 written)
+        for i in 8..RETURN_DATA_SIZE {
+            assert_eq!(data[i], 0xAA, "Byte {} was corrupted", i);
+        }
+    }
+
+    // ===================================================================
+    // compute_exec_price Edge Cases
+    // ===================================================================
+
+    #[test]
+    fn test_compute_exec_price_100_percent_spread() {
+        // 10000 bps = 100%, price should double
+        assert_eq!(compute_exec_price(100_000_000, 10_000).unwrap(), 200_000_000);
+    }
+
+    #[test]
+    fn test_compute_exec_price_1_bps() {
+        // 1 bps = 0.01%
+        // 1_000_000 * 10001 / 10000 = 1_000_100
+        assert_eq!(compute_exec_price(1_000_000, 1).unwrap(), 1_000_100);
+    }
+
+    #[test]
+    fn test_compute_exec_price_truncation() {
+        // When the result is not exact, integer division truncates
+        // 1 * (10000 + 1) / 10000 = 10001 / 10000 = 1 (truncated)
+        assert_eq!(compute_exec_price(1, 1).unwrap(), 1);
+    }
+
+    #[test]
+    fn test_compute_exec_price_small_price_rounds_down() {
+        // 3 * 10050 / 10000 = 30150 / 10000 = 3 (integer division)
+        assert_eq!(compute_exec_price(3, 50).unwrap(), 3);
+    }
+
+    #[test]
+    fn test_compute_exec_price_large_values() {
+        // Near-max u64 price with small spread should not overflow due to u128 intermediate
+        let price = u64::MAX / 2;
+        let result = compute_exec_price(price, 50).unwrap();
+        // Expected: price * 10050 / 10000
+        let expected = ((price as u128) * 10_050u128 / 10_000u128) as u64;
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_compute_exec_price_zero_price() {
+        assert_eq!(compute_exec_price(0, 500).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_compute_exec_price_max_u64_price_small_spread() {
+        // u64::MAX * 10001 / 10000 -- intermediate is u128 so no overflow
+        let result = compute_exec_price(u64::MAX, 1).unwrap();
+        let expected = ((u64::MAX as u128) * 10_001u128 / 10_000u128) as u64;
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_compute_exec_price_large_spread() {
+        // Very large spread (e.g., 50000 bps = 500%)
+        // 1_000_000 * 60000 / 10000 = 6_000_000
+        assert_eq!(compute_exec_price(1_000_000, 50_000).unwrap(), 6_000_000);
+    }
+
+    // ===================================================================
+    // Full Roundtrip / Integration Tests
+    // ===================================================================
+
+    #[test]
+    fn test_full_init_match_roundtrip() {
+        // Simulate: init context, then write exec price, then read everything back
+        let mut data = vec![0u8; CTX_SIZE];
+        let magic = 0x5052_4956_4d41_5443u64;
+        let lp = Pubkey::new_unique();
+
+        // Step 1: Initialize header
+        write_header(&mut data, magic, 2, &lp);
+
+        // Step 2: Verify initialization
+        assert!(verify_magic(&data, magic));
+        assert_eq!(read_lp_pda(&data), lp);
+
+        // Step 3: Compute and write exec price (simulating a match)
+        let oracle_price = 150_000_000u64; // $150 in 6 decimal
+        let spread_bps = 25u64; // 0.25%
+        let exec_price = compute_exec_price(oracle_price, spread_bps).unwrap();
+        write_exec_price(&mut data, exec_price);
+
+        // Step 4: Read back and verify
+        let stored_price = u64::from_le_bytes(data[0..8].try_into().unwrap());
+        assert_eq!(stored_price, exec_price);
+        // 150_000_000 * 10025 / 10000 = 150_375_000
+        assert_eq!(stored_price, 150_375_000);
+
+        // Step 5: Magic and LP PDA still intact after price write
+        assert!(verify_magic(&data, magic));
+        assert_eq!(read_lp_pda(&data), lp);
+    }
+
+    #[test]
+    fn test_multiple_price_writes_preserve_header() {
+        let mut data = vec![0u8; CTX_SIZE];
+        let magic = 0x4A50_594D_4154_4348u64;
+        let lp = Pubkey::new_unique();
+        write_header(&mut data, magic, 0, &lp);
+
+        // Write multiple prices in sequence
+        for price in [1_000_000u64, 50_000_000, 999_999_999, 0, u64::MAX] {
+            write_exec_price(&mut data, price);
+            let stored = u64::from_le_bytes(data[0..8].try_into().unwrap());
+            assert_eq!(stored, price);
+            // Header remains intact
+            assert!(verify_magic(&data, magic));
+            assert_eq!(read_lp_pda(&data), lp);
+            assert_eq!(data[76], 0);
+        }
+    }
+
+    #[test]
+    fn test_different_matchers_same_layout() {
+        // All four matcher types use the same layout structure
+        let magics = [
+            0x5052_4956_4d41_5443u64, // PRIVACY
+            0x564F_4c4d_4154_4348u64, // VOL
+            0x4A50_594D_4154_4348u64, // JPY
+            0x4556_4e54_4d41_5443u64, // EVENT
+        ];
+
+        for &magic in &magics {
+            let mut data = vec![0u8; CTX_SIZE];
+            let lp = Pubkey::new_unique();
+            write_header(&mut data, magic, 1, &lp);
+
+            assert!(verify_magic(&data, magic));
+            assert_eq!(read_lp_pda(&data), lp);
+            assert_eq!(read_magic(&data), magic);
+
+            write_exec_price(&mut data, 42);
+            assert_eq!(u64::from_le_bytes(data[0..8].try_into().unwrap()), 42);
+            // Header still valid after price write
+            assert!(verify_magic(&data, magic));
+        }
+    }
 }
