@@ -1,4 +1,4 @@
-# matcher-sdk
+# percolator-matcher-sdk
 
 Shared Rust library for [Percolator](https://github.com/nicholasgasior/percolator) custom matching programs on Solana.
 
@@ -10,7 +10,7 @@ Add to your matcher's `Cargo.toml`:
 
 ```toml
 [dependencies]
-matcher-common = { path = "../../matcher-sdk" }
+matcher-common = { path = "../../percolator-matcher-sdk" }
 ```
 
 ## Context Account Layout
